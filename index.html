@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reach Your Representative</title>
+  <meta name="description" content="Find your congressional district and members of Congress, then get the right way to contact them about your problem.">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">★</span>
+      <div>
+        <h1>Reach Your Representative</h1>
+        <p class="tagline">Find your members of Congress, and get the way to contact them that actually works.</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel" aria-label="Lookup and contact guidance">
+      <form id="search-form" class="search" autocomplete="on">
+        <label for="address" class="step-label"><span class="step-num">1</span> Enter your home address</label>
+        <div class="search-row">
+          <input id="address" name="street-address" type="text" placeholder="123 Main St, Springfield, IL 62701" required>
+          <button type="submit" class="btn primary">Find</button>
+        </div>
+        <div class="search-alt">
+          <button type="button" id="locate" class="link-btn">Use my location</button>
+          <span class="muted">or click any district on the map</span>
+        </div>
+        <p id="search-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <div id="results" hidden>
+        <div id="district-head"></div>
+        <div id="members" class="members"></div>
+
+        <div class="issue-section">
+          <h2 class="step-label"><span class="step-num">2</span> What do you need help with?</h2>
+          <div id="issues" class="issues" role="list"></div>
+        </div>
+
+        <div id="protocol" class="protocol" hidden></div>
+      </div>
+
+      <div id="intro" class="intro">
+        <h2>How this works</h2>
+        <ol>
+          <li><strong>Find your district.</strong> Census Bureau data matches your address to your congressional district.</li>
+          <li><strong>See your members.</strong> Your House representative and two senators, with their DC and local office numbers.</li>
+          <li><strong>Pick your problem.</strong> Each kind of request has a contact route that works best. Agency problems go to a local caseworker. Votes and opinions go to the Washington office.</li>
+          <li><strong>Send a strong message.</strong> We write a draft from your details. You review it and send it yourself.</li>
+        </ol>
+        <p class="muted small">Nothing you type is stored or sent anywhere except the U.S. Census geocoder, which uses your address to find your district.</p>
+      </div>
+    </section>
+
+    <section class="map-wrap" aria-label="Map of congressional districts">
+      <div id="map"></div>
+      <div class="legend" aria-hidden="true">
+        <span><i class="sw dem"></i>Democrat</span>
+        <span><i class="sw rep"></i>Republican</span>
+        <span><i class="sw ind"></i>Independent</span>
+        <span><i class="sw vac"></i>Vacant</span>
+      </div>
+      <div id="map-loading" class="map-loading">Loading district boundaries…</div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    Data: U.S. Census Bureau (geocoder &amp; TIGERweb 119th/120th Congressional Districts) ·
+    <a href="https://github.com/unitedstates/congress-legislators" target="_blank" rel="noopener">unitedstates/congress-legislators</a> ·
+    Map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.
+    Not affiliated with the U.S. Congress.
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="protocols.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
