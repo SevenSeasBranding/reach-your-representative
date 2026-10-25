@@ -44,6 +44,7 @@ const state = {
   agency: "ssa",
   recipientIdx: 0,
   form: {},
+  sent: new Set(),       // "protocol:bioguide" marked sent in this page view only; never stored
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -240,6 +241,7 @@ async function showLocation(loc, isHome) {
   state.location = loc;
   state.members = membersFor(loc);
   state.recipientIdx = 0;
+  state.sent = new Set();
 
   if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
   if (isHome) homeMarker = L.circleMarker([loc.lat, loc.lng], { radius: 7, color: "#fff", weight: 2, fillColor: "#111", fillOpacity: 1 }).addTo(map);
@@ -275,13 +277,13 @@ function memberTitle(m) {
 }
 function fullName(l) { return l.name.official_full || `${l.name.first} ${l.name.last}`; }
 
-function nearestOffice(leg) {
+function officesByDistance(leg) {
   const offices = (state.offices.get(leg.id.bioguide) || []).filter((o) => o.phone || o.address);
-  if (!offices.length) return null;
   const { lat, lng } = state.location;
   const dist = (o) => (o.latitude == null ? Infinity : (o.latitude - lat) ** 2 + ((o.longitude - lng) * Math.cos(lat * Math.PI / 180)) ** 2);
-  return offices.slice().sort((a, b) => dist(a) - dist(b))[0];
+  return offices.slice().sort((a, b) => dist(a) - dist(b));
 }
+function nearestOffice(leg) { return officesByDistance(leg)[0] || null; }
 function officeLine(o) {
   return [o.address, o.suite, o.building, `${o.city || ""}, ${o.state || ""} ${o.zip || ""}`.trim()].filter(Boolean).join(", ");
 }
@@ -306,6 +308,7 @@ function renderResults() {
     ${notice}`;
 
   $("#members").innerHTML = state.members.map(renderMember).join("");
+  $("#elections").innerHTML = electionsHtml();
   renderIssues();
   if (state.protocolId) renderProtocol();
 }
@@ -337,6 +340,111 @@ function renderMember(m) {
   </div>`;
 }
 
+// ---------- Elections (computed from term dates; no extra data source) ----------
+
+// Federal general elections fall on the Tuesday after the first Monday in November.
+function generalElectionDay(year) {
+  for (let d = 2; d <= 8; d++) {
+    const dt = new Date(year, 10, d);
+    if (dt.getDay() === 2) return dt;
+  }
+}
+function today() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
+const DAY_MS = 86400000;
+const fmtDate = (d) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+// A seat whose term ends Jan 3 of year Y is elected in November of Y-1.
+function termEndElection(endIso) {
+  const year = Number(endIso.slice(0, 4)) - 1;
+  return { date: generalElectionDay(year), takesOffice: new Date(year + 1, 0, 3) };
+}
+// The House cycle: the even-year election that is upcoming, or just held and not yet sworn in.
+function houseCycle() {
+  const t = today();
+  let y = t.getFullYear();
+  if (y % 2) {
+    // Odd year: before Jan 3 the previous November's winners are still waiting to take office.
+    if (t < new Date(y, 0, 3)) y -= 1; else y += 1;
+  }
+  return { date: generalElectionDay(y), takesOffice: new Date(y + 1, 0, 3) };
+}
+function cycleStatus(c) {
+  const t = today();
+  const days = Math.round((c.date - t) / DAY_MS);
+  if (days > 90) return { cls: "later", text: `Next election ${fmtDate(c.date)}` };
+  if (days > 1) return { cls: "soon", text: `${fmtDate(c.date)} · in ${days} days` };
+  if (days === 1) return { cls: "soon", text: `${fmtDate(c.date)} · tomorrow` };
+  if (days === 0) return { cls: "today", text: "Election Day is today. Polls close at different times by state." };
+  if (t < c.takesOffice) return { cls: "held", text: `Held ${fmtDate(c.date)} · winner takes office ${fmtDate(c.takesOffice)}` };
+  return { cls: "later", text: fmtDate(c.date) };
+}
+
+function electionsHtml() {
+  const loc = state.location;
+  const abbr = loc.stateAbbr;
+  const house = houseCycle();
+  const rows = [];
+
+  // The House race follows the district lines for the Congress being elected.
+  const raceCd = loc.cd120 && house.takesOffice.getFullYear() === 2027 ? loc.cd120 : loc.cd119;
+  const raceLabel = districtLabel(FIPS[raceCd.state] || abbr, raceCd.cd);
+  const moved = raceCd !== loc.cd119 && raceLabel !== districtLabel(abbr, loc.cd119.cd);
+  const rep = state.members.find((m) => m.kind === "house")?.leg;
+  const hs = cycleStatus(house);
+  rows.push({
+    sort: house.date,
+    status: hs,
+    title: `U.S. ${houseTitle(abbr)} · ${raceLabel}${moved ? " (new district lines)" : ""}`,
+    sub: rep
+      ? `Now held by ${fullName(rep)} (${partyLetter(rep)})${moved ? ` for ${districtLabel(abbr, loc.cd119.cd)}` : ""}. Elected every 2 years.`
+      : "Seat currently vacant. Elected every 2 years.",
+  });
+
+  for (const m of state.members.filter((x) => x.kind === "senate" && x.leg)) {
+    const t = m.leg.terms.at(-1);
+    const appointed = t.how === "appointment";
+    const c = termEndElection(t.end);
+    const s = appointed
+      ? { cls: "soon", text: `Special election expected, usually at the next general election (${fmtDate(house.date)}). Your state sets the date.` }
+      : cycleStatus(c);
+    rows.push({
+      sort: appointed ? house.date : c.date,
+      status: s,
+      title: `U.S. Senate · ${STATE_NAMES[abbr] || abbr}`,
+      sub: `Now held by ${fullName(m.leg)} (${partyLetter(m.leg)})${appointed ? ", appointed to the seat" : ""}. Six-year terms.`,
+    });
+  }
+  rows.sort((a, b) => a.sort - b.sort);
+
+  const t = today();
+  const timeline = [
+    { date: house.date, label: "Election Day", note: "Polls are open on this date; hours vary by state. Many states also have early voting and mail ballots before it." },
+    { date: new Date(house.date.getTime() + 7 * DAY_MS), label: "Counting and certification", note: "States count and certify results over the following weeks. Some states hold runoffs if no candidate wins outright.", approx: true },
+    { date: house.takesOffice, label: "New Congress sworn in", note: "Winners take office. Until then, your current members still serve you and handle casework." },
+  ].map((e) => ({ ...e, past: e.date < t && !e.approx }));
+
+  return `
+    <h2 class="step-label">Elections for your seats</h2>
+    <ul class="seats">${rows.map((r) => `
+      <li class="seat">
+        <div class="seat-title">${esc(r.title)}</div>
+        <div class="seat-when ${r.status.cls}">${esc(r.status.text)}</div>
+        <div class="seat-sub">${esc(r.sub)}</div>
+      </li>`).join("")}
+    </ul>
+    <ol class="timeline-list">${timeline.map((e) => `
+      <li class="${e.past ? "past" : ""}">
+        <span class="tl-date">${e.approx ? "Following weeks" : esc(fmtDate(e.date))}</span>
+        <span class="tl-label">${esc(e.label)}</span>
+        <span class="tl-note">${esc(e.note)}</span>
+      </li>`).join("")}
+    </ol>
+    <div class="election-links">
+      <a class="btn small" href="https://vote.gov/" target="_blank" rel="noopener">Check registration and how to vote ↗</a>
+      <a class="btn small" href="https://www.usa.gov/state-election-office" target="_blank" rel="noopener">Your state election office (sample ballot, polling place) ↗</a>
+    </div>
+    <p class="muted small">Dates are worked out from each member's term. Candidate lists and state and local races are on your state election office's site. We don't send them your address.</p>`;
+}
+
 function renderIssues() {
   $("#issues").innerHTML = PROTOCOLS.map((p) => `
     <button class="issue" role="listitem" data-id="${p.id}" aria-pressed="${state.protocolId === p.id}">
@@ -355,12 +463,18 @@ function channelHtml(ch, i, p, m) {
   const l = m?.leg;
   const t = l?.terms.at(-1);
   if (ch.kind === "phone-district" && l) {
-    const off = nearestOffice(l);
-    if (off?.phone) actions = `<a class="btn small primary" href="${tel(off.phone)}">Call ${esc(off.city || "district")} office · ${esc(off.phone)}</a>`;
+    const offs = officesByDistance(l).filter((o) => o.phone);
+    const [first, ...rest] = offs;
+    if (first) actions = `<a class="btn small primary" href="${tel(first.phone)}">Call ${esc(first.city || "district")} office · ${esc(first.phone)}</a>`;
     else if (t.phone) actions = `<a class="btn small primary" href="${tel(t.phone)}">Call ${esc(t.phone)} and ask for the district office</a>`;
+    const backups = [...rest.slice(0, 3).map((o) => ({ label: `${o.city || "Local"} office`, phone: o.phone })), ...(first && t.phone ? [{ label: "Washington office", phone: t.phone }] : [])];
+    actions += fallbackHtml(backups) + scriptHtml(p);
   } else if (ch.kind === "phone-dc" && l && t.phone) {
-    actions = state.members.filter((x) => x.leg).map((x) =>
+    const withLeg = state.members.filter((x) => x.leg);
+    actions = withLeg.map((x) =>
       `<a class="btn small ${x === m ? "primary" : ""}" href="${tel(x.leg.terms.at(-1).phone)}">${esc(memberTitle(x))} · ${esc(x.leg.terms.at(-1).phone)}</a>`).join("");
+    const backups = withLeg.map((x) => { const o = nearestOffice(x.leg); return o?.phone && { label: `${memberTitle(x)}, ${o.city || "local"} office`, phone: o.phone }; }).filter(Boolean);
+    actions += fallbackHtml(backups, "Busy or voicemail full? The local offices log your view the same way:") + scriptHtml(p);
   } else if (ch.kind === "form" && l && contactUrl(l)) {
     const targets = p.target === "all" ? state.members.filter((x) => x.leg && contactUrl(x.leg)) : [m];
     actions = targets.map((x) =>
@@ -376,6 +490,24 @@ function channelHtml(ch, i, p, m) {
   return `<li class="channel"><div><span class="rank">${i + 1}.</span><strong>${esc(ch.label)}</strong></div>
     ${ch.note ? `<div class="note">${esc(ch.note)}</div>` : ""}
     ${actions ? `<div class="actions">${actions}</div>` : ""}</li>`;
+}
+
+function fallbackHtml(backups, lead = "No answer or voicemail full? Try, in this order:") {
+  if (!backups.length) return "";
+  return `<div class="fallback"><span>${esc(lead)}</span>
+    <ul>${backups.map((b) => `<li><a href="${tel(b.phone)}">${esc(b.label)} · ${esc(b.phone)}</a></li>`).join("")}</ul>
+    <span class="muted">Lines are busiest right before big votes. Calling early in the day helps, and a voicemail or the contact form is counted the same as a call.</span></div>`;
+}
+
+function scriptHtml(p) {
+  const text = scriptText(p);
+  return `<details class="script"><summary>What to say (about 30 seconds, works for voicemail too)</summary><p class="script-text">${esc(text)}</p></details>`;
+}
+function scriptText(p) {
+  const c = draftContext();
+  return p.phoneScript
+    ? p.phoneScript(c)
+    : `Hi, my name is [your name] and I live at ${c.address}. I'm calling about ${p.callTopic || p.title.toLowerCase()}. ${c.details || "[One sentence on the problem.]"} Please call me back at [your phone]. Thank you.`;
 }
 
 function whoHtml(p) {
@@ -396,11 +528,9 @@ function whoHtml(p) {
     <span class="small">${first.kind === "house" ? "Your House member's office is usually the closest and least busy. A senator's office works too, but contact only one office about the same case." : ""}</span></div>`;
 }
 
+// Only issue details are asked for. Personal details stay as [placeholders]
+// in the draft for the person to fill in after pasting; nothing is collected.
 const FIELD_DEFS = {
-  name: { label: "Your full name", type: "text", ac: "name" },
-  phone: { label: "Phone", type: "tel", ac: "tel" },
-  email: { label: "Email", type: "email", ac: "email" },
-  org: { label: "Organization (optional)", type: "text", ac: "organization" },
   bill: { label: "Bill number or topic", type: "text", placeholder: "H.R. 1234" },
 };
 
@@ -422,7 +552,8 @@ function builderHtml(p) {
     ? `<label>Your position<select data-field="position">
         <option value="support" ${f.position !== "oppose" ? "selected" : ""}>Support</option>
         <option value="oppose" ${f.position === "oppose" ? "selected" : ""}>Oppose</option></select></label>` : "";
-  const recipSel = rs.length > 1
+  const stepMode = p.target === "all" && rs.length > 1;
+  const recipSel = rs.length > 1 && !stepMode
     ? `<label>Write to<select data-field="recipient">${rs.map((m, i) =>
         `<option value="${i}" ${state.recipientIdx === i ? "selected" : ""}>${esc(memberTitle(m))}</option>`).join("")}</select></label>` : "";
   const selects = [recipSel, agencySel, positionSel].filter(Boolean);
@@ -432,13 +563,49 @@ function builderHtml(p) {
     ${selRow}
     ${rows.join("")}
     <label>Details<textarea data-field="details" rows="4" placeholder="Short and factual: what happened, when, and what you are asking for.">${esc(f.details || "")}</textarea></label>
+    ${stepMode ? sendStepsHtml(p, rs) : ""}
+    <div class="draft-head small muted">${rs.length ? `Preview for ${esc(memberTitle(rs[Math.min(state.recipientIdx, rs.length - 1)]))}` : "Preview"}</div>
     <div id="draft" class="draft"></div>
     <div class="draft-actions">
-      <button type="button" class="btn primary" id="copy-draft">Copy message</button>
+      ${stepMode ? "" : `<button type="button" class="btn primary" id="copy-draft">Copy message</button>`}
       ${p.phoneScript ? `<button type="button" class="btn" id="copy-script">Copy phone script</button>` : ""}
       <span id="copy-status" class="muted small" role="status" aria-live="polite"></span>
     </div>
-    <p class="muted small" style="margin:0">Paste this into the official contact form. Offices give priority to messages sent through their website, where they can confirm you are a constituent.</p>
+    ${rs.length ? FORM_TIPS : ""}
+    <p class="muted small" style="margin:0">Paste this into the official contact form and fill in the [bracketed] parts there. Offices give priority to messages sent through their website, where they can confirm you are a constituent. This site never sees or keeps what you write.</p>
+  </div>`;
+}
+
+const FORM_TIPS = `<details class="script"><summary>Tips for official contact forms</summary><ul class="tips">
+  <li>Most forms need your full home address. Some also ask for ZIP+4, which you can look up at <a href="https://tools.usps.com/zip-code-lookup.htm" target="_blank" rel="noopener">USPS ZIP Code lookup ↗</a>.</li>
+  <li>Pick the topic from the form's menu that's closest to your issue. That decides which staff member reads it.</li>
+  <li>Many forms have a box that signs you up for the newsletter. Uncheck it if you don't want one.</li>
+  <li>If a form says you're not a constituent, check the address you entered. Use the address where you live or are registered to vote.</li>
+  <li>If the form breaks, call the local office instead. It's counted the same way.</li>
+</ul></details>`;
+
+const sentKey = (m) => `${state.protocolId}:${m.leg.id.bioguide}`;
+
+// One step per member: copy the draft written to them, open their form, mark it sent.
+// Progress lives only in memory for this page view.
+function sendStepsHtml(p, rs) {
+  const done = rs.filter((m) => state.sent.has(sentKey(m))).length;
+  const active = rs.findIndex((m) => !state.sent.has(sentKey(m)));
+  return `<div class="send-steps">
+    <div class="send-head"><strong>Send to all ${rs.length} members</strong>
+      <span class="muted small">${done === rs.length ? "All sent. Nice work." : `${done} of ${rs.length} sent`} · not saved</span></div>
+    <ol>${rs.map((m, i) => {
+      const sent = state.sent.has(sentKey(m));
+      const url = contactUrl(m.leg);
+      return `<li class="send-step${sent ? " done" : ""}${i === active ? " active" : ""}">
+        <div class="send-name">${sent ? "✓ " : ""}${esc(memberTitle(m))}</div>
+        <div class="actions">
+          <button type="button" class="btn small${i === active ? " primary" : ""}" data-copy-for="${i}">1. Copy message</button>
+          ${url ? `<a class="btn small" href="${esc(url)}" target="_blank" rel="noopener">2. Open form ↗</a>` : ""}
+          <button type="button" class="btn small" data-mark-sent="${i}" aria-pressed="${sent}">${sent ? "Undo" : "3. Mark sent"}</button>
+        </div>
+      </li>`;
+    }).join("")}</ol>
   </div>`;
 }
 
@@ -486,19 +653,18 @@ function draftContext() {
   const address = loc.address || "[your full home address]";
   const zip = loc.address?.match(/\b\d{5}\b(?!.*\b\d{5}\b)/)?.[0];
   const city = loc.address?.split(",").slice(-3, -2)[0]?.trim();
-  const contact = [f.phone, f.email].filter(Boolean).join(" or ") || "[phone or email]";
   return {
     memberTitle: m ? memberTitle(m) : "Representative",
     memberShort: m ? memberTitle(m) : "the member",
-    name: f.name || "[Your name]",
+    name: "[Your name]",
     address,
     cityZip: city && zip ? `${titleCase(city)}, ${loc.stateAbbr} ${zip}` : (zip || "[your city and ZIP]"),
-    contact,
+    contact: "[your phone or email]",
     details: (f.details || "").trim(),
     agencyName: AGENCIES[state.agency].name,
     bill: (f.bill || "").trim(),
     positionVerb: f.position === "oppose" ? "oppose" : "support",
-    org: (f.org || "").trim(),
+    org: "",
   };
 }
 const titleCase = (s) => s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
@@ -508,16 +674,34 @@ function updateDraft() {
   const box = $("#draft");
   if (!p || !box) return;
   box.textContent = p.template(draftContext());
+  const script = scriptText(p);
+  document.querySelectorAll("#protocol .script-text").forEach((el) => { el.textContent = script; });
+}
+
+// Older copy path for browsers and embedded webviews that deny the Clipboard API.
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
 }
 
 async function copyText(text, label) {
   const status = $("#copy-status");
+  let ok = false;
   try {
     await navigator.clipboard.writeText(text);
-    status.textContent = `${label} copied.`;
+    ok = true;
   } catch {
-    status.textContent = "Couldn't copy automatically. Select the text and copy it yourself.";
+    ok = legacyCopy(text);
   }
+  status.textContent = ok ? `${label} copied.` : "Couldn't copy automatically. Select the text in the preview and copy it yourself.";
   setTimeout(() => { if (status) status.textContent = ""; }, 3000);
 }
 
@@ -559,6 +743,25 @@ $("#protocol").addEventListener("input", (e) => {
 });
 
 $("#protocol").addEventListener("click", (e) => {
+  const copyFor = e.target.closest("[data-copy-for]");
+  if (copyFor) {
+    state.recipientIdx = Number(copyFor.dataset.copyFor);
+    renderProtocol();
+    const p = PROTOCOLS.find((x) => x.id === state.protocolId);
+    copyText(p.template(draftContext()), `Message for ${memberTitle(recipientsFor(p)[state.recipientIdx])}`);
+    return;
+  }
+  const markSent = e.target.closest("[data-mark-sent]");
+  if (markSent) {
+    const p = PROTOCOLS.find((x) => x.id === state.protocolId);
+    const rs = recipientsFor(p);
+    const key = sentKey(rs[Number(markSent.dataset.markSent)]);
+    if (state.sent.has(key)) state.sent.delete(key); else state.sent.add(key);
+    const next = rs.findIndex((m) => !state.sent.has(sentKey(m)));
+    if (next >= 0) state.recipientIdx = next;
+    renderProtocol();
+    return;
+  }
   if (e.target.id === "copy-draft") copyText($("#draft").textContent, "Message");
   if (e.target.id === "copy-script") {
     const p = PROTOCOLS.find((x) => x.id === state.protocolId);
